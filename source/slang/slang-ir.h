@@ -2257,9 +2257,9 @@ public:
     // It represents the version of module regarding semantics and doesn't have
     // anything to do with serialization format
     //
-    const static UInt k_minSupportedModuleVersion = 31;
-    // Version 32 adds `IRFileOrNamespaceScopeStaticVarDecoration`.
-    const static UInt k_maxSupportedModuleVersion = 32;
+    const static UInt k_minSupportedModuleVersion = 33;
+    // Version 34 adds `IRFileOrNamespaceScopeStaticVarDecoration`.
+    const static UInt k_maxSupportedModuleVersion = 34;
     static_assert(k_minSupportedModuleVersion <= k_maxSupportedModuleVersion);
 
     /// Returns whether `version` is in the inclusive range this compiler can load.
