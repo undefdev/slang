@@ -3454,9 +3454,14 @@ static bool _isResourceTypeSupportedForFileOrNamespaceStaticReplacement(Type* ty
     // element was assigned.
     type = _getUnmodifiedInnermostArrayElementType(type);
 
-    // The allow-list below is narrower than all types tagged as opaque. We recurse through
-    // homogeneous arrays, but we do not recursively classify fields of a struct. Supporting a
-    // struct would require replacing its resource fields while leaving its other fields intact.
+    // The allow-list below is narrower than all types tagged as opaque. The IR-side predicate
+    // `_isResourceValueOrArrayTypeSupportedForStaticReplacement` rejects the same types, so the
+    // transformation remains safe even if it receives IR that did not pass through this
+    // diagnostic.
+    //
+    // We admit homogeneous arrays, but we do not recursively classify fields of a struct.
+    // Supporting a struct would require replacing its resource fields while leaving its other
+    // fields intact.
     // Parameter groups and combined texture-sampler types can expand into several resource values,
     // so we reject them until the replacement pass handles those values explicitly. Append and
     // consume buffers remain one value for HLSL, but `lowerAppendConsumeStructuredBuffers` splits

@@ -52,7 +52,8 @@ struct UninitializedVariableUseEffect
 /// control-flow analysis to that variable alone. Entries in `useEffects` override the inferred
 /// effect of their exact uses; all other uses are classified from the IR as usual. Each entry must
 /// name a distinct use reached by following SSA-value flow or storage-access transfers from
-/// `variable`.
+/// `variable`. Unlike the module-wide warning pass, this function preserves write-free paths
+/// through loops instead of applying its legacy exception for aggregate element initialization.
 void checkForUsingUninitializedVariable(
     IRGlobalValueWithCode* code,
     IRInst* variable,

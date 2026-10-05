@@ -3148,6 +3148,17 @@ static bool isWaveReadLaneFirstUse(IRInst* readingInst)
     return getBuiltinFuncEnum(call->getCallee()) == KnownBuiltinDeclName::WaveReadLaneFirst;
 }
 
+/// A `LoopInitializationPolicy` controls how definite-assignment analysis treats a write inside a
+/// loop.
+enum class LoopInitializationPolicy
+{
+    /// Preserve every write-free CFG path through a loop.
+    PreserveWriteFreePaths,
+
+    /// Treat a loop as initializing the value when any block in the loop contains a definite write.
+    AssumeLoopExecutesAWrite,
+};
+
 /// Retain reads reachable along at least one path without a preceding write classified as definite.
 ///
 /// We walk forward from the function entry and stop propagation after a write classified as
@@ -3159,7 +3170,8 @@ static void retainReadsNotDefinitelyInitialized(
     IRGlobalValueWithCode* func,
     const List<IRInst*>& definiteWrites,
     List<IRInst*>& reads,
-    const WaveElectionContext& waveElection)
+    const WaveElectionContext& waveElection,
+    LoopInitializationPolicy loopInitializationPolicy)
 {
     if (reads.getCount() == 0)
         return;
@@ -3253,56 +3265,61 @@ static void retainReadsNotDefinitelyInitialized(
         }
     }
 
-    // We retain an existing permissive exception intended for constant-trip-count loops that
-    // initialize an array or vector element by element. A structural CFG analysis includes a
-    // zero-trip path and would report noisy false positives after loops such as
-    // `[ForceUnroll] for (i) result[i] = ...;`.
+    // The module-wide warning pass retains an existing permissive exception intended for
+    // constant-trip-count loops that initialize an array or vector element by element. A
+    // structural CFG analysis includes a zero-trip path and would report noisy false positives
+    // after loops such as `[ForceUnroll] for (i) result[i] = ...;`.
     //
-    // When the loop body contains a definite write, we therefore stop uninitialized state at the
-    // loop's break block. Uninitialized state still enters the body, so a read before the first
-    // write continues to diagnose the bug reported in #10658.
+    // Under `AssumeLoopExecutesAWrite`, we therefore stop uninitialized state at the loop's break
+    // block when the loop body contains a definite write. Uninitialized state still enters the
+    // body, so a read before the first write continues to diagnose the bug reported in #10658.
     HashSet<IRBlock*> suppressedBreakBlocks;
-    for (auto block : func->getBlocks())
+    if (loopInitializationPolicy == LoopInitializationPolicy::AssumeLoopExecutesAWrite)
     {
-        auto loop = as<IRLoop>(block->getTerminator());
-        if (!loop)
-            continue;
-        auto breakBlock = loop->getBreakBlock();
+        for (auto block : func->getBlocks())
+        {
+            auto loop = as<IRLoop>(block->getTerminator());
+            if (!loop)
+                continue;
+            auto breakBlock = loop->getBreakBlock();
 
-        // We collect blocks reachable from the loop target without crossing the break block. If
-        // any collected block contains a definite write, we treat the loop as initialized when
-        // control reaches the break block.
-        //
-        // This exception is deliberately permissive. It can miss a conditional write in a loop
-        // whose trip count or per-iteration control flow this analysis does not prove. We accept
-        // that known limitation to avoid warnings for code that initializes aggregate elements in a
-        // loop.
-        HashSet<IRBlock*> bodyVisited;
-        List<IRBlock*> bodyWork;
-        bodyVisited.add(breakBlock); // sentinel: never traverse past the break block
-        if (auto target = loop->getTargetBlock())
-        {
-            if (bodyVisited.add(target))
-                bodyWork.add(target);
-        }
-        bool bodyHasDefiniteWrite = false;
-        while (bodyWork.getCount())
-        {
-            auto b = bodyWork.getLast();
-            bodyWork.removeLast();
-            if (blocksWithDefiniteWrite.contains(b))
+            // We collect blocks reachable from the loop target without crossing the break block.
+            // If any collected block contains a definite write, we treat the loop as initialized
+            // when control reaches the break block.
+            //
+            // This exception is deliberately permissive. It can miss a conditional write in a
+            // loop whose trip count or per-iteration control flow this analysis does not prove. We
+            // accept that known limitation only for the module-wide warning pass, where preserving
+            // established diagnostics for aggregate element initialization takes priority. A
+            // transformation that creates storage requiring definite initialization preserves
+            // every write-free loop path instead.
+            HashSet<IRBlock*> bodyVisited;
+            List<IRBlock*> bodyWork;
+            bodyVisited.add(breakBlock); // sentinel: never traverse past the break block
+            if (auto target = loop->getTargetBlock())
             {
-                bodyHasDefiniteWrite = true;
-                break;
+                if (bodyVisited.add(target))
+                    bodyWork.add(target);
             }
-            for (auto succ : b->getSuccessors())
+            bool bodyHasDefiniteWrite = false;
+            while (bodyWork.getCount())
             {
-                if (bodyVisited.add(succ))
-                    bodyWork.add(succ);
+                auto b = bodyWork.getLast();
+                bodyWork.removeLast();
+                if (blocksWithDefiniteWrite.contains(b))
+                {
+                    bodyHasDefiniteWrite = true;
+                    break;
+                }
+                for (auto succ : b->getSuccessors())
+                {
+                    if (bodyVisited.add(succ))
+                        bodyWork.add(succ);
+                }
             }
+            if (bodyHasDefiniteWrite)
+                suppressedBreakBlocks.add(breakBlock);
         }
-        if (bodyHasDefiniteWrite)
-            suppressedBreakBlocks.add(breakBlock);
     }
 
     // We now walk forward from the entry while the variable may still be uninitialized. A block
@@ -3476,7 +3493,8 @@ static UninitializedReadSets getUninitializedReads(
     IRGlobalValueWithCode* func,
     IRInst* inst,
     const WaveElectionContext& waveElection,
-    ConstArrayView<UninitializedVariableUseEffect> useEffects = {})
+    ConstArrayView<UninitializedVariableUseEffect> useEffects,
+    LoopInitializationPolicy loopInitializationPolicy)
 {
     // We first retain reads that no possible write can reach; these receive diagnostics 41016 or
     // 41033. For the remaining reads, definite-assignment analysis retains those reachable along a
@@ -3509,7 +3527,8 @@ static UninitializedReadSets getUninitializedReads(
         func,
         definiteWrites,
         result.possiblyUninitializedReads,
-        waveElection);
+        waveElection,
+        loopInitializationPolicy);
 
     for (Index i = 0; i < result.possiblyUninitializedReads.getCount();)
     {
@@ -3857,7 +3876,13 @@ static void checkUninitializedValues(IRFunc* func, DiagnosticSink* sink)
             // We collect both diagnostic classes from one set of reads and writes. The first class
             // has no reachable possible write. The second has a possible write, but some path
             // reaches the read without a write that this checker classifies as definite.
-            auto reads = getUninitializedReads(reachability, func, inst, waveElection);
+            auto reads = getUninitializedReads(
+                reachability,
+                func,
+                inst,
+                waveElection,
+                {},
+                LoopInitializationPolicy::AssumeLoopExecutesAWrite);
 
             diagnoseUninitializedUses<
                 Diagnostics::UsingUninitializedVariable,
@@ -3982,7 +4007,13 @@ void checkForUsingUninitializedVariable(
     SLANG_RELEASE_ASSERT(isChildInstOf(variable, code));
     ReachabilityContext reachability(code);
     auto waveElection = collectWaveElectionContext(code);
-    auto reads = getUninitializedReads(reachability, code, variable, waveElection, useEffects);
+    auto reads = getUninitializedReads(
+        reachability,
+        code,
+        variable,
+        waveElection,
+        useEffects,
+        LoopInitializationPolicy::PreserveWriteFreePaths);
     auto type = getTrackedValueType(variable);
 
     diagnoseUninitializedUses<

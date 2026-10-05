@@ -26553,7 +26553,9 @@ struct HitObject
         };
     }
 
-    // SetShaderBindingTableRecordIndex EXT helper
+    // This SPIR-V operation updates one field of an existing hit object; it does not construct the
+    // rest of the object. The parameter is therefore `inout`, so definite-initialization analysis
+    // requires a complete input value and preserves the updated object for the caller.
     [require(spirv, spvShaderInvocationReorderEXT)]
     static void __spirvSetShaderTableIndexEXT(inout HitObject hitObject, uint sbtRecordIndex)
     {

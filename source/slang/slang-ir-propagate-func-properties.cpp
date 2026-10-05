@@ -78,15 +78,13 @@ public:
                 if (isDebugInfoInst(inst))
                     continue;
 
-                // Is this inst known to not have global side effect/analyzable?
+                // Generic side-effect metadata identifies most memory reads. Dedicated resource
+                // operations are the exception: they can read resource contents without reporting
+                // side effects. Either kind of read prevents `ReadNone`.
                 if (!isKnownOpCodeWithSideEffect(inst->getOp()))
                 {
                     if (inst->mightHaveSideEffects() || doesOpReadResourceContents(inst->getOp()))
                     {
-                        // We have a inst that has side effect that is not understood by this
-                        // method, e.g. bufferStore, discard, etc. or we are seeing a resource load.
-                        // These operations are not movable or removable,
-                        // and should not be treated as ReadNone.
                         hasNonReadNoneOp = true;
                         break;
                     }
@@ -276,19 +274,14 @@ public:
 
                 if (!isKnownOpCodeWithSideEffect(inst->getOp()))
                 {
-                    // Is this inst known to not have global side effect/analyzable?
+                    // For instructions outside the small set handled below, the generic
+                    // side-effect classification gives us the complete answer.
                     if (inst->mightHaveSideEffects())
                     {
-                        // We have a inst that has side effect and is not understood by this method.
-                        // e.g. bufferStore, discard, etc.
                         hasSideEffectCall = true;
                         break;
                     }
-                    else
-                    {
-                        // A side effect free inst can't generate side effects for the function.
-                        continue;
-                    }
+                    continue;
                 }
 
                 if (auto call = as<IRCall>(inst))

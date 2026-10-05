@@ -5,6 +5,7 @@
 // has no source location.
 
 static int uninitializedGlobal;
+RaytracingAccelerationStructure accelerationStructure;
 RWStructuredBuffer<int> output;
 
 int readAssemblyArgument(__constref int value)
@@ -285,6 +286,115 @@ int partiallyInitializeLocalThroughAssemblyAddress()
 //CHECK:         ^ variable 'value' may be uninitialized on some paths; it is only conditionally assigned
 }
 
+// Shader-launch instructions read their payload before the launched shader may update it. These
+// cases keep one uninitialized local at each payload operand position recognized by the analysis.
+// If an index is off by one, its corresponding diagnostic disappears.
+void traceRayWithUninitializedPayload()
+{
+    uint zero = 0;
+    uint mask = 0xff;
+    float3 origin = float3(0.0);
+    float3 direction = float3(0.0, 0.0, 1.0);
+    float tMin = 0.0;
+    float tMax = 1.0;
+    int payload;
+    spirv_asm
+/*CHECK:
+    ^^^^^^^^^ use of uninitialized variable
+    ^^^^^^^^^ use of uninitialized variable 'payload'
+*/
+    {
+        OpCapability RayTracingKHR;
+        OpExtension "SPV_KHR_ray_tracing";
+        OpTraceRayKHR $accelerationStructure $zero $mask $zero $zero $zero
+            $origin $tMin $direction $tMax &payload;
+    };
+}
+
+void traceMotionRayWithUninitializedPayload()
+{
+    uint zero = 0;
+    uint mask = 0xff;
+    float3 origin = float3(0.0);
+    float3 direction = float3(0.0, 0.0, 1.0);
+    float tMin = 0.0;
+    float tMax = 1.0;
+    float currentTime = 0.0;
+    int payload;
+    spirv_asm
+/*CHECK:
+    ^^^^^^^^^ use of uninitialized variable
+    ^^^^^^^^^ use of uninitialized variable 'payload'
+*/
+    {
+        OpCapability RayTracingMotionBlurNV;
+        OpExtension "SPV_NV_ray_tracing_motion_blur";
+        OpTraceRayMotionNV $accelerationStructure $zero $mask $zero $zero $zero
+            $origin $tMin $direction $tMax $currentTime &payload;
+    };
+}
+
+void executeCallableWithUninitializedPayload()
+{
+    uint shaderIndex = 0;
+    int payload;
+    spirv_asm
+/*CHECK:
+    ^^^^^^^^^ use of uninitialized variable
+    ^^^^^^^^^ use of uninitialized variable 'payload'
+*/
+    {
+        OpCapability RayTracingKHR;
+        OpExtension "SPV_KHR_ray_tracing";
+        OpExecuteCallableKHR $shaderIndex &payload;
+    };
+}
+
+void emitMeshTasksWithUninitializedPayload()
+{
+    uint groupCount = 1;
+    int payload;
+    spirv_asm
+/*CHECK:
+    ^^^^^^^^^ use of uninitialized variable
+    ^^^^^^^^^ use of uninitialized variable 'payload'
+*/
+    {
+        OpCapability MeshShadingEXT;
+        OpExtension "SPV_EXT_mesh_shader";
+        OpEmitMeshTasksEXT $groupCount $groupCount $groupCount &payload;
+        %later = OpLabel;
+    };
+}
+
+// Setting the shader-table index changes one field of an existing hit object. The instruction
+// therefore reads the hit object as well as possibly writing it.
+void setIndexOnUninitializedHitObject()
+{
+    HitObject hitObject;
+    uint shaderTableIndex = 0;
+    spirv_asm
+/*CHECK:
+    ^^^^^^^^^ use of uninitialized variable
+    ^^^^^^^^^ use of uninitialized variable 'hitObject'
+*/
+    {
+        OpCapability ShaderInvocationReorderEXT;
+        OpExtension "SPV_EXT_shader_invocation_reorder";
+        OpHitObjectSetShaderBindingTableRecordIndexEXT &hitObject $shaderTableIndex;
+    };
+}
+
+// The core-module helper exposes the same read/write contract to callers. Declaring its hit-object
+// parameter as `out` would incorrectly make this call count as complete initialization.
+void callSetIndexHelperWithUninitializedHitObject()
+{
+    HitObject hitObject;
+    HitObject::__spirvSetShaderTableIndexEXT(hitObject, 0);
+//CHECK:                                    ^ use of uninitialized variable
+//CHECK:                                    ^ use of uninitialized variable 'hitObject'
+}
+
 [numthreads(1, 1, 1)]
 void main()
 {
@@ -313,4 +423,11 @@ void main()
                 readUninitializedThroughExportedAssemblyAddress() +
                 initializeThroughExportedAssemblyAddress() +
                 partiallyInitializeLocalThroughAssemblyAddress();
+
+    traceRayWithUninitializedPayload();
+    traceMotionRayWithUninitializedPayload();
+    executeCallableWithUninitializedPayload();
+    emitMeshTasksWithUninitializedPayload();
+    setIndexOnUninitializedHitObject();
+    callSetIndexHelperWithUninitializedHitObject();
 }

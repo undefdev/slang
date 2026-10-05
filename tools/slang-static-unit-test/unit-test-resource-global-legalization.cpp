@@ -7,6 +7,7 @@
 #include "slang/slang-capability.h"
 #include "slang/slang-ir-explicit-global-init.h"
 #include "slang/slang-ir-legalize-resource-globals.h"
+#include "slang/slang-ir-propagate-func-properties.h"
 #include "slang/slang-ir-util.h"
 #include "slang/slang-ir-validate.h"
 #include "slang/slang-module.h"
@@ -25,6 +26,72 @@ SLANG_UNIT_TEST(resourceContentReadClassificationIncludesDedicatedOperations)
     SLANG_CHECK(doesOpReadResourceContents(kIROp_Sample));
     SLANG_CHECK(doesOpReadResourceContents(kIROp_SampleGrad));
     SLANG_CHECK(doesOpReadResourceContents(kIROp_StructuredBufferConsume));
+}
+
+// `ReadNone` promises that a function does not read memory. We put a dedicated `Sample` operation
+// in one function and only a debug line in another. The first function must remain unmarked, while
+// the second remains eligible for `ReadNone` because debug metadata does not inspect runtime state.
+SLANG_UNIT_TEST(funcPropertyPropagationDistinguishesResourceReadsFromDebugInfo)
+{
+    StaticUnitTestEnv env(unitTestContext);
+    RefPtr<IRModule> module = IRModule::create(env.getSessionImpl());
+    IRBuilder builder(module.get());
+    builder.setInsertInto(module.get());
+
+    auto debugSource = builder.emitDebugSource(toSlice("test.slang"), UnownedStringSlice(), false);
+    auto voidFunctionType = builder.getFuncType(0, nullptr, builder.getVoidType());
+
+    auto zero = builder.getIntValue(builder.getIntType(), 0);
+    auto float2Type = builder.getVectorType(builder.getFloatType(), 2);
+    auto float4Type = builder.getVectorType(builder.getFloatType(), 4);
+    IRInst* textureTypeOperands[] = {
+        float4Type,
+        builder.getType(kIROp_TextureShape2DType),
+        zero, // isArray
+        zero, // isMultisample
+        zero, // sampleCount
+        zero, // read-only access
+        zero, // isShadow
+        zero, // isCombined
+        zero, // unknown image format
+    };
+    auto textureType = builder.getType(
+        kIROp_TextureType,
+        SLANG_COUNT_OF(textureTypeOperands),
+        textureTypeOperands);
+    auto texture = builder.createGlobalParam(textureType);
+    auto sampler = builder.createGlobalParam(cast<IRType>(builder.getType(kIROp_SamplerStateType)));
+    auto coordinate = builder.createGlobalParam(float2Type);
+
+    auto resourceReader = builder.createFunc();
+    resourceReader->setFullType(voidFunctionType);
+    builder.setInsertInto(resourceReader);
+    builder.emitBlock();
+    builder.emitDebugLine(debugSource, 1, 1, 1, 1);
+    IRInst* sampleOperands[] = {texture, sampler, coordinate};
+    builder.emitIntrinsicInst(
+        float4Type,
+        kIROp_Sample,
+        SLANG_COUNT_OF(sampleOperands),
+        sampleOperands);
+    builder.emitReturn();
+
+    builder.setInsertInto(module.get());
+    auto debugOnly = builder.createFunc();
+    debugOnly->setFullType(voidFunctionType);
+    builder.setInsertInto(debugOnly);
+    builder.emitBlock();
+    builder.emitDebugLine(debugSource, 2, 2, 1, 1);
+    builder.emitReturn();
+
+    DiagnosticSink validationSink;
+    validateIRModule(module.get(), &validationSink);
+    SLANG_CHECK(validationSink.getErrorCount() == 0);
+
+    propagateFuncProperties(module.get());
+
+    SLANG_CHECK(!resourceReader->findDecoration<IRReadNoneDecoration>());
+    SLANG_CHECK(debugOnly->findDecoration<IRReadNoneDecoration>());
 }
 
 // Some operations directly produce an address into resource contents. Initializer analysis must

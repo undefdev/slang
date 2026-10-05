@@ -78,21 +78,39 @@ bool doesInstOnlyDependOnOperandTypes(IRInst* inst)
     }
 }
 
-static bool _isResourceValueTypeSupportedForStaticReplacement(IRType* type)
+bool isSingleResourceValueType(IRType* type)
 {
-    // Semantic checking has already limited replacement candidates to resource, sampler,
-    // structured-buffer, and byte-address-buffer types that remain one IR value. In particular, it
-    // excludes acceleration structures because Khronos and WGSL reject the generated local
-    // variables. It excludes dynamic resources because Khronos legalization requires each cast to
-    // resolve to one module-scope dynamic-resource parameter or one indexed element. We remove
-    // attributed, rate-qualified, and array wrappers, then recognize the IR types produced for the
-    // accepted source types. The source-language policy remains in semantic checking.
+    type = cast<IRType>(unwrapAttributedType(type));
+    return as<IRResourceTypeBase>(type) || as<IRSamplerStateTypeBase>(type) ||
+           as<IRHLSLStructuredBufferTypeBase>(type) || as<IRByteAddressBufferTypeBase>(type);
+}
+
+static bool _isResourceValueOrArrayTypeSupportedForStaticReplacement(IRType* type)
+{
+    // Semantic checking reports unsupported source declarations through
+    // `_isResourceTypeSupportedForFileOrNamespaceStaticReplacement` in `slang-check-decl.cpp`.
+    // We repeat the same type boundary here so that this transformation never relies on an earlier
+    // diagnostic having run. In particular, combined texture-sampler types expand into multiple IR
+    // values, while append and consume buffers are split by target legalization. Neither shape can
+    // be represented by the one-local-per-global transformation.
     type = cast<IRType>(unwrapAttributedType(type));
     while (auto arrayType = as<IRArrayTypeBase>(type))
         type = cast<IRType>(unwrapAttributedType(arrayType->getElementType()));
 
-    return as<IRResourceTypeBase>(type) || as<IRSamplerStateTypeBase>(type) ||
-           as<IRHLSLStructuredBufferTypeBase>(type) || as<IRByteAddressBufferTypeBase>(type);
+    if (!isSingleResourceValueType(type))
+        return false;
+
+    if (auto resourceType = as<IRResourceTypeBase>(type))
+        return !resourceType->isCombined();
+
+    switch (type->getOp())
+    {
+    case kIROp_HLSLAppendStructuredBufferType:
+    case kIROp_HLSLConsumeStructuredBufferType:
+        return false;
+    default:
+        return true;
+    }
 }
 
 bool isFileOrNamespaceScopeStaticResourceGlobalToReplace(IRGlobalVar* globalVar)
@@ -110,7 +128,7 @@ bool isFileOrNamespaceScopeStaticResourceGlobalToReplace(IRGlobalVar* globalVar)
     if (!ptrType)
         return false;
 
-    return _isResourceValueTypeSupportedForStaticReplacement(ptrType->getValueType());
+    return _isResourceValueOrArrayTypeSupportedForStaticReplacement(ptrType->getValueType());
 }
 
 bool isShaderOrCudaKernelEntryPoint(IRFunc* func)

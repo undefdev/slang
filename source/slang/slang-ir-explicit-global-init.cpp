@@ -179,18 +179,6 @@ struct MoveGlobalVarInitializationToEntryPointsPass
         }
     };
 
-    /// Return whether `type` represents one resource value rather than aggregate data.
-    bool isSingleResourceValueType(IRType* type)
-    {
-        // A parameter group may store a texture, sampler, or buffer value as a field. Loading that
-        // field copies the resource value; it does not read the resource's contents. We
-        // intentionally exclude arrays and structs because loading an aggregate could also read
-        // non-resource data from the parameter group.
-        type = as<IRType>(unwrapAttributedType(type));
-        return as<IRResourceTypeBase>(type) || as<IRSamplerStateTypeBase>(type) ||
-               as<IRHLSLStructuredBufferTypeBase>(type) || as<IRByteAddressBufferTypeBase>(type);
-    }
-
     /// Return facts about the storage that `value` may address.
     AddressProvenance getAddressProvenance(IRInst* value, HashSet<IRInst*>& visited)
     {
@@ -240,11 +228,19 @@ struct MoveGlobalVarInitializationToEntryPointsPass
 
         if (hasParameterGroupType)
         {
-            // The compiler packs source-level global uniform parameters into one synthesized
-            // parameter group. Those fields retain the semantics of the original parameters; the
-            // generated container does not turn a uniform read into a source-level resource read.
-            // We therefore classify only whether the synthesized group is mutable, without marking
-            // its fields as parameter-group storage.
+            // Consider an initializer such as
+            //
+            //     uniform Texture2D textures[4];
+            //     uniform uint textureIndex;
+            //     static Texture2D cachedTexture = textures[textureIndex];
+            //
+            // The entry-point invocation receives `textureIndex` as an immutable parameter, and
+            // the moved initializer executes after that parameter is available. Later IR lowering
+            // may pack the parameter into a synthesized parameter group, but the packing does not
+            // make this read depend on execution order. We therefore preserve the source
+            // parameter's classification instead of rejecting the initializer merely because of
+            // its compiler-generated container. A mutable group still sets
+            // `mayReferToPreexistingMutableStorage` and is rejected by the caller.
             auto elementType = parameterGroupType->getElementType();
             if (elementType && elementType->findDecoration<IRSynthesizedParameterGroupDecoration>())
             {
@@ -444,6 +440,10 @@ struct MoveGlobalVarInitializationToEntryPointsPass
                 {
                     HashSet<IRInst*> visited;
                     auto provenance = getAddressProvenance(loadedAddress, visited);
+                    // Loading one resource value from a parameter group copies that value; it does
+                    // not read the resource's contents. We intentionally classify arrays and
+                    // structs as parameter-group data because one aggregate load could also copy
+                    // non-resource data.
                     bool readsParameterGroupData = provenance.mayReferToParameterGroupStorage &&
                                                    !isSingleResourceValueType(inst->getDataType());
                     if (provenance.mayReferToPreexistingMutableStorage ||

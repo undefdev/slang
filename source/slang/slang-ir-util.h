@@ -239,12 +239,20 @@ IRType* getMatrixElementType(IRType* type);
 /// A value-use analysis may ignore these instructions without treating their operands as read.
 bool doesInstOnlyDependOnOperandTypes(IRInst* inst);
 
+/// Return whether `type`, after removing attributed and rate wrappers, represents one resource
+/// value rather than an aggregate containing resource values.
+///
+/// This predicate recognizes texture, sampler, structured-buffer, and byte-address-buffer IR
+/// types. It does not recursively inspect arrays, structs, or other aggregate types, and it does
+/// not decide whether a particular resource type is legal in any source-language context.
+bool isSingleResourceValueType(IRType* type);
+
 /// Return whether `globalVar` is marked as a `static` variable declared at file or namespace
 /// scope, has no explicit rate, and stores one resource value or an array of resource values.
 ///
 /// This predicate recognizes the marker, rate, and value-type conditions that identify globals
-/// selected for replacement. It assumes that source semantic checking has already restricted the
-/// resource type and storage modifiers to the subset supported by that transformation.
+/// selected for replacement. It also rechecks the IR type against the source-language type policy,
+/// so callers do not need to assume that semantic checking rejected every unsupported type.
 bool isFileOrNamespaceScopeStaticResourceGlobalToReplace(IRGlobalVar* globalVar);
 
 /// Return whether `func` is a shader entry point or a CUDA kernel.
